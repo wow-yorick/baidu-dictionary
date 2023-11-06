@@ -137,15 +137,17 @@ See URL `https://github.com/xuchunyang/chinese-word-at-point.el' for more info."
     (append-to-file (concat word "\n") nil search-history-file))
   (let* ((salt (get-salt))
          (sign (get-sign salt word))
-         (url-request-data (mapconcat #'identity (list (concat "q=" (url-hexify-string word))
-                                                       (concat "from=" from)
-                                                       (concat "to=" to)
-                                                       (concat "appid=" app-key)
-                                                       (concat "salt=" salt)
-                                                       (concat "sign=" sign))
-                                      "&" ))
+         (req-data (mapconcat #'identity (list (concat "q=" (url-hexify-string word))
+                                               (concat "from=" from)
+                                               (concat "to=" to)
+                                               (concat "appid=" app-key)
+                                               (concat "salt=" salt)
+                                               (concat "sign=" sign))
+                              "&" ))
+         (url-request-data req-data)
          (url-request-method "POST")
          (url-request-extra-headers '(("Content-Type" . "application/x-www-form-urlencoded"))))
+    (message req-data)
     (if callback
         (url-retrieve api-url callback)
       (with-current-buffer (url-retrieve-synchronously api-url)
@@ -176,30 +178,182 @@ See URL `https://github.com/xuchunyang/chinese-word-at-point.el' for more info."
 
 (defun -format-result (json)
   "Format result in JSON."
-  (let* ((query        (assoc-default 'query       json)) ; string
-         (translation  (assoc-default 'translation json)) ; array
-         (_errorCode    (assoc-default 'errorCode   json)) ; number
-         (web          (assoc-default 'web         json)) ; array
-         (basic        (assoc-default 'basic       json)) ; alist
-         ;; construct data for display
-         (phonetic (assoc-default 'phonetic basic))
-         (translation-str (mapconcat
-                           (lambda (trans) (concat "- " trans))
-                           translation "\n"))
-         (basic-explains-str (mapconcat
-                              (lambda (explain) (concat "- " explain))
-                              (assoc-default 'explains basic) "\n"))
-         (web-str (mapconcat
-                   (lambda (k-v)
-                     (format "- %s :: %s"
-                             (assoc-default 'key k-v)
-                             (mapconcat 'identity (assoc-default 'value k-v) "; ")))
-                   web "\n")))
-    (if basic
-        (format "%s [%s]\n\n* Basic Explains\n%s\n\n* Web References\n%s\n"
-                query phonetic basic-explains-str web-str)
-      (format "%s\n\n* Translation\n%s\n"
-              query translation-str))))
+  (let* ((_errorCode   (assoc-default 'error_code   json)) ; number
+         (_errorMsg    (assoc-default 'error_msg   json))
+         (_transResult  (assoc-default 'trans_result         json)) ; array
+         (query (mapconcat
+                 (lambda (k-v)
+                   (format "-%s"
+                           (assoc-default 'src k-v)))
+                 _transResult "\n"))
+         (dst (mapconcat
+               (lambda (k-v)
+                 (format "-%s"
+                         (assoc-default 'dst k-v)))
+               _transResult "\n")))
+    (format "%s \n\n* Basic Explains\n%s\n"
+            query dst)))
+
+(defun -pos-tip (string)
+  "Show STRING using pos-tip-show."
+  (pos-tip-show string nil nil nil 0)
+  (unwind-protect
+      (push (read-event) unread-command-events)
+    (pos-tip-hide)))
+
+(defvar current-buffer-word nil)
+
+(defun -posframe-tip (string)
+  "Show STRING using posframe-show."
+  (unless (and (require 'posframe nil t) (posframe-workable-p))
+    (error "Posframe not workable"))
+
+  (let ((word (-region-or-word)))
+    (if word
+        (progn
+          (with-current-buffer (get-buffer-create buffer-name)
+            (let ((inhibit-read-only t))
+              (erase-buffer)
+                                        ;(mode)
+              (insert string)
+              (goto-char (point-min))
+              (set (make-local-variable 'baidu-dictionary-current-buffer-word) word)))
+          (posframe-show buffer-name
+                         :left-fringe 8
+                         :right-fringe 8
+                         :internal-border-color (face-foreground 'default)
+                         :internal-border-width 1)
+          (unwind-protect
+              (push (read-event) unread-command-events)
+            (progn
+              (posframe-delete buffer-name)
+              (other-frame 0))))
+      (message "Nothing to look up"))))
+
+(defun -search-and-show-in-buffer-subr (word content)
+  (with-current-buffer (get-buffer-create buffer-name)
+    (let ((inhibit-read-only t))
+      (erase-buffer)
+                                        ;(mode)
+      (insert content)
+      (goto-char (point-min))
+      (set (make-local-variable 'baidu-dictionary-current-buffer-word) word))
+    (unless (get-buffer-window (current-buffer))
+      (switch-to-buffer-other-window buffer-name))))
+
+
+(defun -search-and-show-in-buffer (word &optional async)
+  "Search WORD and show result in `baidu-dictionary-buffer-name' buffer."
+  (unless word
+    (user-error "Nothing to look up"))
+  (if async
+      (-request word (lambda (_status)
+                       (-search-and-show-in-buffer-subr
+                        word
+                        (-format-result (-parse-response)))))
+    (-search-and-show-in-buffer-subr word (-format-result (-request word)))))
+
+
+:autoload
+(defun search-at-point ()
+  "Search word at point and display result with buffer."
+  (interactive)
+  (let ((word (-region-or-word)))
+    (-search-and-show-in-buffer word)))
+
+
+(defun search-at-point- (func)
+  "Search word at point and display result with given FUNC."
+  (let ((word (-region-or-word)))
+    (if word
+        (funcall func (-format-result (-request word)))
+      (message "Nothing to look up"))))
+
+:autoload
+(defun search-at-point+ ()
+  "Search word at point and display result with popup-tip."
+  (interactive)
+  (search-at-point- #'popup-tip))
+
+:autoload
+(defun search-at-point-posframe ()
+  "Search word at point and display result with posframe."
+  (interactive)
+  (search-at-point- #'-posframe-tip))
+
+:autoload
+(defun search-at-point-tooltip ()
+  "Search word at point and display result with pos-tip."
+  (interactive)
+  (search-at-point- #'-pos-tip))
+
+:autoload
+(defun search-from-input ()
+  "Search word from input and display result with buffer."
+  (interactive)
+  (let ((word (-prompt-input)))
+    (-search-and-show-in-buffer word)))
+
+:autoload
+(defun search-and-replace ()
+  "Search word at point and replace this word with popup menu."
+  (interactive)
+  (if (use-region-p)
+      (let ((region-beginning (region-beginning)) (region-end (region-end))
+            (selected (popup-menu* (mapcar #'-strip-explain
+                                           (append (-explains
+                                                    (-request
+                                                     (-region-or-word)))
+                                                   nil)))))
+        (when selected
+          (insert selected)
+          (kill-region region-beginning region-end)))
+    ;; No active region
+    (let* ((bounds (bounds-of-thing-at-point (if use-chinese-word-segmentation
+                                                 'chinese-or-other-word
+                                               'word)))
+           (beginning-of-word (car bounds))
+           (end-of-word (cdr bounds)))
+      (when bounds
+        (let ((selected
+               (popup-menu* (mapcar
+                             #'-strip-explain
+                             (append (-explains
+                                      (-request
+                                       (thing-at-point
+                                        (if use-chinese-word-segmentation
+                                            'chinese-or-other-word
+                                          'word))))
+                                     nil)))))
+          (when selected
+            (insert selected)
+            (kill-region beginning-of-word end-of-word)))))))
+
+(defvar history nil)
+
+:autoload
+(defun search (query)
+  "Show the explanation of QUERY from Baidu dictionary."
+  (interactive
+   (let* ((string (or (if (use-region-p)
+                          (buffer-substring
+                           (region-beginning) (region-end))
+                        (thing-at-point 'word))
+                      (read-string "Search Baidu Dictionary: " nil 'history))))
+     (list string)))
+  (-search-and-show-in-buffer query))
+
+:autoload
+  (defun search-async (query)
+    "Show the explanation of QUERY from Baidu dictionary asynchronously."
+    (interactive
+     (let* ((string (or (if (use-region-p)
+                            (buffer-substring
+                             (region-beginning) (region-end))
+                          (thing-at-point 'word))
+                        (read-string "Search Baidu Dictionary: " nil 'history))))
+       (list string)))
+    (-search-and-show-in-buffer query 'async))
 
 )
 
